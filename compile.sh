@@ -6,10 +6,11 @@
 # yasm -f win64 syscalls.asm -o syscalls.o
 # x86_64-w64-mingw32-g++ main.cpp syscalls.o -o $NAME -O2 -s -static-libstdc++ -static-libgcc -ldbghelp -lntdll
 NAME="$(mktemp -u HJK_XXXXXXXX).exe"
-rm *.exe
+echo "Compiling $NAME"
 # x86_64-w64-mingw32-g++ main.cpp -o "$NAME" -O2 -s -static-libstdc++ -static-libgcc
 # x86_64-w64-mingw32-g++ main.cpp -o "$NAME"
-x86_64-w64-mingw32-g++ main.cpp -o "$NAME"   -O1   -fno-stack-protector   -fvisibility=hidden   -Wl,--subsystem,console   -Wl,-emain    -lshlwapi -ldbghelp -lkernel32 -lntdll
+x86_64-w64-mingw32-g++ main.c -o "$NAME"   -O1   -fno-stack-protector   -fvisibility=hidden   -Wl,--subsystem,console   -Wl,-emain    -lshlwapi -ldbghelp -lkernel32 -lntdll
 cp $NAME /home/vedlam/maldev
 # rm *.o
+rm *.exe
 
