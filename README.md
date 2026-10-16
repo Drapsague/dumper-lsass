@@ -86,9 +86,3 @@ Helper utilities for packaging and obfuscating payloads during delivery:
 ├── compile.sh    # mingw-w64 cross-compilation script
 └── script/       # payload packaging helpers (RDI, XOR, hex→base64)
 ```
-
-## Disclaimer
-
-This software is provided for educational and authorized security research
-purposes only. The authors assume no liability and are not responsible for any
-misuse or damage caused by this program.
